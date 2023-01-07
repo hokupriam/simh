@@ -211,7 +211,7 @@ extern int32 find_unit_index(UNIT *uptr);
 #define JADE_PROM_MASK          (JADE_PROM_SIZE-1)
 #define JADE_MEM_SIZE           2048
 #define JADE_MEM_MASK           (JADE_MEM_SIZE-1)
-#define JADE_BANK_BASE          0xe000
+#define JADE_BANK_BASE          0xF800
 #define JADE_BANK_SIZE          1024
 #define JADE_BANK_MASK          (JADE_BANK_SIZE-1)
 #define JADE_IO_SIZE            1
