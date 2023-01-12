@@ -1035,6 +1035,13 @@ static uint8 DCM_Execute()
 
         case DC_RDS:
             sts = DCM_ReadSector(cb[CB_DRV], cb[CB_TRK], cb[CB_SEC], sbuf);
+            //A read of track 1 sector 2 means the boot prom has finished and the BIOS is now loading CCP/BDOS
+            //Unmap PROM now
+            if (cb[CB_TRK] == 1 && cb[CB_SEC] == 2 && jade_info->pe)
+            {
+                jade_info->pe = 0;
+                sim_map_resource(jade_info->prom_base, jade_info->prom_size, RESOURCE_TYPE_MEMORY, &jadeprom, "jadeprom", 1);
+            }
             break;
 
         case DC_WRS:

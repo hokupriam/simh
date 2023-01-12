@@ -87,6 +87,7 @@ extern DEVICE scp300f_dev;
 extern DEVICE djhdc_dev;
 
 extern DEVICE priam_dev;
+extern DEVICE priamserial_dev;
 
 extern long disasm (unsigned char *data, char *output, int segsize, long offset);
 extern t_stat parse_sym_m68k(char* c, t_addr a, UNIT* u, t_value* val, int32 sw);
@@ -156,8 +157,10 @@ DEVICE      *sim_devices[]  = {
     &n8vem_dev,
     /* Floppy Controller Cores */
     &i8272_dev, &wd179x_dev,
-    //Priam Smart
+    //Priam Smart (iamge)
     &priam_dev,
+    //Priam Smart over serial
+    &priamserial_dev,
     NULL
 };
 
