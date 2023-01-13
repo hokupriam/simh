@@ -47,22 +47,120 @@ extern uint32 sim_map_resource(uint32 baseaddr, uint32 size, uint32 resource_typ
 
 #define READMAXTRIES 0
 
+#define PRIAM_SECTOR_SIZE        512
+#define PRIAM_SPT               22
+#define PRIAM_HEADS             4
+#define PRIAM_CYLINDERS         185
+#define PRIAM_TRACKS            (PRIAM_HEADS * PRIAM_CYLINDERS) 
+#define PRIAM_CAPACITY           (PRIAM_TRACKS*PRIAM_SPT)*PRIAM_SECTOR_SIZE      /* Default Jade Disk Capacity */
+
+#define PRIAM_IO_BASE          0xF0
+#define PRIAM_IO_SIZE          8
+
+#define PRIAM_BUFFER_SIZE          1024
+
+#define PRIAM_REGNO_FROMADDRESS(x) (x - PRIAM_IO_BASE)
+
+#define PRIAMREGIN_PAR0 2
+#define PRIAMREGIN_PAR1 3
+#define PRIAMREGIN_PAR2 4
+#define PRIAMREGIN_PAR3 5
+#define PRIAMREGIN_PAR4 6
+#define PRIAMREGIN_PAR5 7
+
+#define PRIAMREGIN_CMD 0
+
+#define PRIAMREGIN_DATA 1
+
+#define PRIAMREGIN_DRIVENO PRIAMREGIN_PAR0
+#define PRIAMREGIN_HEAD_CYLUPPER PRIAMREGIN_PAR1
+#define PRIAMREGIN_CYLLOWER PRIAMREGIN_PAR2
+#define PRIAMREGIN_SECTOR PRIAMREGIN_PAR3
+#define PRIAMREGIN_NUMSECTORS PRIAMREGIN_PAR4
+
+#define PRIAMREGOUT_RES0 2
+#define PRIAMREGOUT_RES1 3
+#define PRIAMREGOUT_RES2 4
+#define PRIAMREGOUT_RES3 5
+#define PRIAMREGOUT_RES4 6
+#define PRIAMREGOUT_RES5 7
+
+#define PRIAMREGOUT_STAT 0
+#define PRIAMREGOUT_DATA 1
+
+#define PRIAMREGOUT_TRANSTATUS PRIAMREGOUT_RES0
+#define PRIAMREGOUT_HEAD_CYLUPPER PRIAMREGOUT_RES1
+#define PRIAMREGOUT_CYLLOWER PRIAMREGOUT_RES2
+#define PRIAMREGOUT_SECTOR PRIAMREGOUT_RES3
+#define PRIAMREGOUT_NUMSECTORS PRIAMREGOUT_RES4
+
+#define PRIAMSTATUS_CMDREJECT (1 << 7)
+#define PRIAMSTATUS_COMPREQ (1 << 6)
+#define PRIAMSTATUS_BUSY (1 << 3)
+#define PRIAMSTATUS_DATAXFERREQ (1 << 2)
+#define PRIAMSTATUS_ISREADREQ (1 << 1)
+#define PRIAMSTATUS_DBUSENABLE (1 << 0)
+
+
+#define PRIAMTRANSTATE_DRIVE(x) ((x & 3) << 6)
+#define PRIAMTRANSTATE_COMPTYPE(x) ((x & 3) << 4)
+#define PRIAMTRANSTATE_COMPCODE(x) ((x & 7) << 0)
+
+#define PRIAMCMD_COMPACK 0
+#define PRIAMCMD_READNORETRY 0x43
+#define PRIAMCMD_READWITHRETRY 0x53
+#define PRIAMCMD_WRITENORETRY 0x42
+#define PRIAMCMD_WRITEWITHRETRY 0x52
+#define PRIAMCMD_SEQUENCEUPANDRETURN 0x83
+#define PRIAMCMD_SEQUENCEDOWN 0x81
+
+
+typedef enum 
+{
+    NOREADWRITE,
+    INPROGRESS,
+    LASTBYTEDONE
+} readwritestate_t;
+
+
+
+typedef struct {
+	uint32 readptr;
+	uint32 writeptr;
+	uint8 data[PRIAM_BUFFER_SIZE];
+    uint32 havenumbytesfromdrive;
+    uint32 havenumbytesfromuser;
+	uint32 neednumbytesfromdrive;
+	uint32 neednumbytesfromuser;
+    readwritestate_t readstate;
+    readwritestate_t writestate;
+} PRIAM_INTERNALBUFFER;
+
+
+
+
 
 typedef struct {
 	uint32 io_base;     /* I/O Base Address                 */
 	uint32 io_size;     /* I/O Address Space requirement    */
     SERHANDLE serPort;	
     char serPortName[MAXPORTNAME];
+
+	PRIAM_INTERNALBUFFER* buffer;
+	uint8 inregs[PRIAM_IO_SIZE];
+	uint8 outregs[PRIAM_IO_SIZE];
 } PRIAMSERIAL_INFO;
+
 
 
 static REG priamserial_reg[] = {
 	{ NULL }
 };
 
+static PRIAM_INTERNALBUFFER PriamBuffer;
 
 
-static PRIAMSERIAL_INFO priamserial_info_data = { PRIAMSERIAL_IO_BASE, PRIAMSERIAL_IO_SIZE,INVALID_HANDLE, ""};
+static PRIAMSERIAL_INFO priamserial_info_data = { PRIAMSERIAL_IO_BASE, PRIAMSERIAL_IO_SIZE,INVALID_HANDLE, "", 0, {0}, {0} };
 
 static PRIAMSERIAL_INFO *priamserial_info = &priamserial_info_data;
 
@@ -82,6 +180,7 @@ static t_stat Priamserial_set_port(UNIT* uptr, int32 val, CONST char* cptr, void
 t_stat Priamserial_show_port(FILE* st, UNIT* uptr, int32 val, CONST void* desc);
 
 static int32 Priamserial_Readserial(uint8* result, int count, int maxtries);
+static t_stat priamserial_spin(UNIT* uptr, int32 value, CONST char* cptr, void* desc);
 
 
 #define PRIAMSERIAL_NAME  "Priam Smart Controller over serial port"
@@ -114,31 +213,25 @@ static MTAB priamserial_mod[] = {
         NULL, NULL, NULL, "Verbose messages for unit " PRIAMSERIAL_NAME "n"                    },
 	{ MTAB_XTD | MTAB_VDV,    0,                      "PORT",  "PORT",
 		&Priamserial_set_port, & Priamserial_show_port, NULL, "Sets Priam serial port"   },
-
+	{ MTAB_XTD | MTAB_VDV,  1,     NULL,           "SPINUP",         &priamserial_spin,
+		NULL, NULL, "Priam drive spin up"},
+	{ MTAB_XTD | MTAB_VDV,  0,      NULL,           "SPINDOWN",      &priamserial_spin,
+		NULL, NULL, "Priam drive spin down"   },
     
     { 0 }
 };
 
 /* Debug flags */
 #define ERROR_MSG           (1 << 0)
-#define SEEK_MSG            (1 << 1)
-#define CMD_MSG             (1 << 2)
-#define RD_DATA_MSG         (1 << 3)
-#define WR_DATA_MSG         (1 << 4)
+#define SERIAL_MSG            (1 << 1)
 #define STATUS_MSG          (1 << 5)
-#define RD_DATA_DETAIL_MSG  (1 << 6)
-#define WR_DATA_DETAIL_MSG  (1 << 7)
 
 /* Debug Flags */
 static DEBTAB priamserial_dt[] = {
     { "ERROR",      ERROR_MSG,          "Error messages"        },
-    { "SEEK",       SEEK_MSG,           "Seek messages"         },
-    { "CMD",        CMD_MSG,            "Command messages"      },
-    { "READ",       RD_DATA_MSG,        "Read messages"         },
-    { "WRITE",      WR_DATA_MSG,        "Write messages"        },
+    { "SERIAL",     SERIAL_MSG,         "Serial comms messages" },
     { "STATUS",     STATUS_MSG,         "Status messages"       },
-    { "RDDETAIL",   RD_DATA_DETAIL_MSG, "Read detail messages"  },
-    { "WRDETAIL",   WR_DATA_DETAIL_MSG, "Write detail messags"  },
+    
     { NULL,         0                                           }
 };
 
@@ -187,6 +280,18 @@ t_stat priamserial_reset(DEVICE *dptr)
             return SCPE_ARG;
         }
     }
+
+	PriamBuffer.readptr = 0;
+	PriamBuffer.writeptr = 0;
+	
+    PriamBuffer.havenumbytesfromdrive = 0;
+    PriamBuffer.havenumbytesfromuser = 0;
+    PriamBuffer.neednumbytesfromdrive = 0;
+    PriamBuffer.neednumbytesfromuser = 0;
+    PriamBuffer.readstate = NOREADWRITE;
+    PriamBuffer.writestate = NOREADWRITE;
+
+	priamserial_info->buffer = &PriamBuffer;
 
     sim_debug(STATUS_MSG, &priamserial_dev, PRIAMSERIAL_SNAME ": reset controller.\n");
 
@@ -276,6 +381,28 @@ t_stat Priamserial_show_port(FILE* st, UNIT* uptr, int32 val, CONST void* desc)
 }
 
 
+static t_stat priamserial_spin(UNIT* uptr, int32 value, CONST char* cptr, void* desc)
+{
+    
+    PRIAMSerial_Out(PRIAMREGIN_DRIVENO + PRIAMSERIAL_IO_BASE, 0);
+
+    if (value)
+    {
+        PRIAMSerial_Out(PRIAMREGIN_CMD + PRIAMSERIAL_IO_BASE, PRIAMCMD_SEQUENCEUPANDRETURN);
+    }
+    else
+    {
+        PRIAMSerial_Out(PRIAMREGIN_CMD + PRIAMSERIAL_IO_BASE, PRIAMCMD_SEQUENCEDOWN);
+    }
+    
+    
+    while (!(PRIAMSerial_In(PRIAMREGOUT_STAT + PRIAMSERIAL_IO_BASE) & PRIAMSTATUS_COMPREQ));
+
+    PRIAMSerial_Out(PRIAMREGIN_CMD + PRIAMSERIAL_IO_BASE, PRIAMCMD_COMPACK);
+    return SCPE_OK;
+}
+
+
 
 static t_stat priamserial_svc(UNIT *uptr)
 {
@@ -339,6 +466,8 @@ static int32 Priamserial_Readserial(uint8* result, int count, int maxtries)
     return count;
 }
 
+
+
 //IN instruction, our OUTPUT
 static uint8 PRIAMSerial_In(uint32 Addr)
 {
@@ -352,11 +481,59 @@ static uint8 PRIAMSerial_In(uint32 Addr)
         return 0;
     }
 
+
+    sim_debug(SERIAL_MSG, &priamserial_dev, "\nIN reg %ld\n", regno);
+
     buf[0] = regno;
 
+    //Check if data read command
+    if (regno == PRIAMREGOUT_DATA)
+    {
+        //Check if read in progress
+        if (priamserial_info->buffer->readstate == INPROGRESS)
+        {
+            //Read
+            uint8 b = priamserial_info->buffer->data[priamserial_info->buffer->readptr];
+            priamserial_info->buffer->readptr = (priamserial_info->buffer->readptr + 1) % PRIAM_BUFFER_SIZE;
+            if (priamserial_info->buffer->readptr == priamserial_info->buffer->writeptr)
+                priamserial_info->buffer->readstate = LASTBYTEDONE;
+
+            sim_debug(SERIAL_MSG, &priamserial_dev, "\tRet from buffer: %02X\n", b);
+            
+
+            return b;
+        }
+        else
+        {
+            sim_printf("Error! Read not in progress on data register read\n");
+        }
+    }
+	else if (regno == PRIAMREGOUT_STAT)
+	{
+		//Check if read or write in progress
+		if (priamserial_info->buffer->readstate == INPROGRESS)
+		{
+
+            sim_debug(SERIAL_MSG, &priamserial_dev, "\tRead Ret xfer req\n");
+			//Signal more bytes areavailable;
+			return PRIAMSTATUS_DATAXFERREQ | PRIAMSTATUS_ISREADREQ | PRIAMSTATUS_DBUSENABLE;
+		}
+        else if (priamserial_info->buffer->writestate == INPROGRESS)
+        {
+			sim_debug(SERIAL_MSG, &priamserial_dev, "\tWrite Ret xfer req\n");
+			//Signal more bytes areavailable;
+			return PRIAMSTATUS_DATAXFERREQ | PRIAMSTATUS_DBUSENABLE;
+        }
+        
+	}
+
+
+    sim_debug(SERIAL_MSG, &priamserial_dev, "\tSerwrite % 02X\n", buf[0]);
     
+
     if (sim_write_serial(priamserial_info->serPort, buf, 1) != 1)
     {
+        
         sim_printf(PRIAMSERIAL_SNAME " IN instruction: Serial write error.\n");
         return 0;
     }
@@ -368,7 +545,10 @@ static uint8 PRIAMSerial_In(uint32 Addr)
         sim_printf(PRIAMSERIAL_SNAME " IN instruction: Serial read error.\n");
         return 0;
     }
+
+    sim_debug(SERIAL_MSG, &priamserial_dev, "\tRet from serread: %02X\n", (uint8_t)(buf[0]));
     
+
     return buf[0];
 }
 
@@ -378,6 +558,12 @@ static uint8 PRIAMSerial_Out(uint32 Addr, int32 Data)
 	uint8 regno = Addr - PRIAMSERIAL_IO_BASE;
 	char buf[2];
 
+
+    sim_debug(SERIAL_MSG, &priamserial_dev, "\nOUT reg %ld value %02lx\n", regno, (uint8_t)(Data));
+    
+	
+	priamserial_info->inregs[regno] = Data;
+
 	if (priamserial_info->serPort == INVALID_HANDLE)
 	{
 		sim_printf(PRIAMSERIAL_SNAME " OUT instruction: port not open.\n");
@@ -386,12 +572,116 @@ static uint8 PRIAMSerial_Out(uint32 Addr, int32 Data)
 
 	buf[0] = regno | 0x80; //Signal write
     buf[1] = (char)Data;
-	if (sim_write_serial(priamserial_info->serPort, buf, 2) != 2)	
+
+
+    
+
+	if (regno == PRIAMREGIN_DATA)
+	{
+		//Check if write in progress, if so buffer this write
+		if (priamserial_info->buffer->writestate == INPROGRESS)
+		{
+            if (!priamserial_info->buffer->neednumbytesfromuser || priamserial_info->buffer->neednumbytesfromuser == priamserial_info->buffer->havenumbytesfromuser)
+            {
+                sim_printf("Error! Not expecting bytes on data register write\n");
+                return Data;
+            }
+            else
+            {
+                //Write
+                priamserial_info->buffer->data[priamserial_info->buffer->writeptr] = Data;
+
+                priamserial_info->buffer->writeptr = (priamserial_info->buffer->writeptr + 1) % PRIAM_BUFFER_SIZE;
+
+                priamserial_info->buffer->havenumbytesfromuser++;
+                
+
+                if (priamserial_info->buffer->neednumbytesfromuser == priamserial_info->buffer->havenumbytesfromuser)
+                {
+                    sim_debug(SERIAL_MSG, &priamserial_dev, "\tWrite complete, send buffer\n");
+
+#if 0
+                    for (uint32_t k = 0; k < priamserial_info->buffer->havenumbytesfromuser; k++)
+                    {
+                        if (k && !(k%16))
+                            sim_debug(SERIAL_MSG, &priamserial_dev, "\n");
+                        sim_debug(SERIAL_MSG, &priamserial_dev, "%02X", priamserial_info->buffer->data[priamserial_info->buffer->readptr + k]);
+
+                    }
+#endif
+
+                    sim_write_serial(priamserial_info->serPort, 
+                                    &priamserial_info->buffer->data[priamserial_info->buffer->readptr], 
+                                    priamserial_info->buffer->havenumbytesfromuser);
+                    priamserial_info->buffer->writestate = LASTBYTEDONE;
+                }
+                else
+                {
+                    sim_debug(SERIAL_MSG, &priamserial_dev, "\tByte write stored in buffer\n");
+                }
+                
+
+                return Data;
+            }
+		}
+		else
+		{
+			sim_printf("Error! Write not in progress on data register write\n");
+		}
+	}
+
+
+	sim_debug(SERIAL_MSG, &priamserial_dev, "\tSerwrite %02X %02X\n", (uint8_t)(buf[0]), (uint8_t)(buf[1]));
+
+	if (sim_write_serial(priamserial_info->serPort, buf, 2) != 2)
 	{
 		sim_printf(PRIAMSERIAL_SNAME " OUT instruction: Serial write error.\n", priamserial_info->serPortName);
 		return 0;
 	}
 
+    //If read or write command, setup for buffering
+    if (regno == PRIAMREGIN_CMD && (Data == PRIAMCMD_READNORETRY || Data == PRIAMCMD_READWITHRETRY))
+    {
+        uint32 numToRead = priamserial_info->inregs[PRIAMREGIN_NUMSECTORS] * PRIAM_SECTOR_SIZE;
+        priamserial_info->buffer->readptr = 0;
+        priamserial_info->buffer->writeptr = 0;
+        //char brk;
+        
+        //sim_read_serial(priamserial_info->serPort, &priamserial_info->buffer->data[priamserial_info->buffer->writeptr], 
+        //    numToRead,
+        //    &brk);
+        if (Priamserial_Readserial(&priamserial_info->buffer->data[priamserial_info->buffer->writeptr], numToRead, 0) != numToRead)
+            sim_printf("Data read error\n");
+
+
+        sim_debug(SERIAL_MSG, &priamserial_dev, "\tSerread got %04lX bytes\n", numToRead);
+        
+
+        priamserial_info->buffer->writeptr = (priamserial_info->buffer->writeptr + numToRead) % PRIAM_BUFFER_SIZE;
+
+        priamserial_info->buffer->writestate = NOREADWRITE;
+        priamserial_info->buffer->readstate = INPROGRESS;
+
+        
+
+    }
+	else if (regno == PRIAMREGIN_CMD && (Data == PRIAMCMD_WRITENORETRY || Data == PRIAMCMD_WRITEWITHRETRY))
+	{
+		uint32 numToWrite = priamserial_info->inregs[PRIAMREGIN_NUMSECTORS] * PRIAM_SECTOR_SIZE;
+		priamserial_info->buffer->readptr = 0;
+		priamserial_info->buffer->writeptr = 0;
+        priamserial_info->buffer->neednumbytesfromuser = numToWrite;
+        priamserial_info->buffer->havenumbytesfromuser = 0;
+
+		
+		priamserial_info->buffer->writestate = INPROGRESS;
+		priamserial_info->buffer->readstate = NOREADWRITE;
+
+
+
+	}
+
+    
     return(Data);
 }
 
